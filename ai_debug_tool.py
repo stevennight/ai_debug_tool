@@ -7,7 +7,7 @@ AI提示词调试工具
 import json
 import logging
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 import configparser
 import os
 import traceback
@@ -17,12 +17,56 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict
 import threading
 import time
+import base64
+from pathlib import Path
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+# ===== PDF处理函数 =====
+
+def pdf_to_images(pdf_path: str) -> list[str]:
+    """将PDF转换为图片的base64编码列表
+    
+    :param pdf_path: PDF文件路径
+    :return: 图片base64编码列表
+    """
+    try:
+        from pdf2image import convert_from_path
+        from PIL import Image
+        import io
+        
+        # 将PDF转换为图片列表
+        images = convert_from_path(pdf_path, dpi=200)
+        
+        base64_images = []
+        for img in images:
+            # 将图片转换为RGB模式（如果不是的话）
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # 压缩图片以减小大小
+            # 如果图片太大，缩小尺寸
+            max_size = 2048
+            if max(img.size) > max_size:
+                ratio = max_size / max(img.size)
+                new_size = tuple(int(dim * ratio) for dim in img.size)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # 转换为base64
+            buffer = io.BytesIO()
+            img.save(buffer, format='JPEG', quality=85)
+            img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            base64_images.append(img_base64)
+        
+        return base64_images
+    except ImportError:
+        raise ImportError("需要安装 pdf2image 和 Pillow 库。请运行: pip install pdf2image Pillow")
+    except Exception as e:
+        raise Exception(f"PDF转换失败: {str(e)}")
 
 # ===== 从example.py复制的必要类定义 =====
 
@@ -246,6 +290,10 @@ class AIDebugTool:
         # 加载配置
         self.config = Config()
         
+        # 存储上传的PDF图片
+        self.uploaded_images = []
+        self.uploaded_pdf_name = None
+        
         # 创建界面
         self.create_widgets()
         
@@ -387,6 +435,36 @@ class AIDebugTool:
         self.user_text.pack(fill=tk.BOTH, expand=True)
         self.user_text.insert('1.0', '你好，请介绍一下自己。')
         
+        # 文件上传区域
+        upload_frame = ttk.LabelFrame(left_frame, text="文件上传 (PDF)", padding=5)
+        upload_frame.pack(fill=tk.X, pady=5)
+        
+        # 上传按钮和状态
+        upload_btn_frame = ttk.Frame(upload_frame)
+        upload_btn_frame.pack(fill=tk.X)
+        
+        self.upload_button = ttk.Button(
+            upload_btn_frame,
+            text="选择PDF文件",
+            command=self.upload_pdf
+        )
+        self.upload_button.pack(side=tk.LEFT, padx=5)
+        
+        self.upload_status_label = ttk.Label(
+            upload_btn_frame,
+            text="未上传文件",
+            foreground='gray'
+        )
+        self.upload_status_label.pack(side=tk.LEFT, padx=10)
+        
+        self.clear_upload_button = ttk.Button(
+            upload_btn_frame,
+            text="清除",
+            command=self.clear_upload,
+            state=tk.DISABLED
+        )
+        self.clear_upload_button.pack(side=tk.LEFT, padx=5)
+        
         # 按钮区域
         button_frame = ttk.Frame(left_frame)
         button_frame.pack(fill=tk.X, pady=5)
@@ -490,6 +568,53 @@ class AIDebugTool:
         self.log_text.delete('1.0', tk.END)
         self.log_text.config(state=tk.DISABLED)
     
+    def upload_pdf(self):
+        """上传PDF文件"""
+        file_path = filedialog.askopenfilename(
+            title="选择PDF文件",
+            filetypes=[("PDF文件", "*.pdf"), ("所有文件", "*.*")]
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            # 显示处理中状态
+            self.upload_status_label.config(text="处理中...", foreground='orange')
+            self.upload_button.config(state=tk.DISABLED)
+            self.root.update()
+            
+            # 转换PDF为图片
+            base64_images = pdf_to_images(file_path)
+            
+            # 保存结果
+            self.uploaded_images = base64_images
+            self.uploaded_pdf_name = Path(file_path).name
+            
+            # 更新UI状态
+            status_text = f"已上传: {self.uploaded_pdf_name} ({len(base64_images)} 页)"
+            self.upload_status_label.config(text=status_text, foreground='green')
+            self.clear_upload_button.config(state=tk.NORMAL)
+            
+            messagebox.showinfo("成功", f"PDF已转换为 {len(base64_images)} 张图片")
+            
+        except Exception as e:
+            error_msg = str(e)
+            self.upload_status_label.config(text="上传失败", foreground='red')
+            messagebox.showerror("错误", f"处理PDF失败:\n{error_msg}")
+            self.uploaded_images = []
+            self.uploaded_pdf_name = None
+        
+        finally:
+            self.upload_button.config(state=tk.NORMAL)
+    
+    def clear_upload(self):
+        """清除已上传的文件"""
+        self.uploaded_images = []
+        self.uploaded_pdf_name = None
+        self.upload_status_label.config(text="未上传文件", foreground='gray')
+        self.clear_upload_button.config(state=tk.DISABLED)
+    
     def send_request(self):
         """发送AI请求"""
         # 禁用发送按钮
@@ -538,7 +663,30 @@ class AIDebugTool:
             messages = []
             if system_content:
                 messages.append(LlmMessage(role=LlmMessageRole.SYSTEM, content=system_content))
-            messages.append(LlmMessage(role=LlmMessageRole.USER, content=user_content))
+            
+            # 构建User消息内容
+            if self.uploaded_images:
+                # 如果有上传的PDF图片，使用多模态格式
+                user_message_content = [
+                    {
+                        "type": "text",
+                        "text": user_content
+                    }
+                ]
+                
+                # 添加所有PDF页面的图片
+                for img_base64 in self.uploaded_images:
+                    user_message_content.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_base64}"
+                        }
+                    })
+                
+                messages.append(LlmMessage(role=LlmMessageRole.USER, content=user_message_content))
+            else:
+                # 纯文本消息
+                messages.append(LlmMessage(role=LlmMessageRole.USER, content=user_content))
             
             # 获取配置
             api_url = self.api_url_var.get()
@@ -556,6 +704,11 @@ class AIDebugTool:
             self.root.after(0, lambda: self.append_output(f"[{timestamp}] ", 'timestamp'))
             self.root.after(0, lambda: self.append_output(f"请求模型: {model_name} ({'流式' if use_stream else '非流式'})\n", 'success'))
             
+            # 如果有上传PDF，显示信息
+            if self.uploaded_images:
+                pdf_info = f"已附加PDF: {self.uploaded_pdf_name} ({len(self.uploaded_images)} 页)\n"
+                self.root.after(0, lambda: self.append_output(pdf_info, 'info'))
+            
             self.root.after(0, lambda: self.append_log(f"{'='*60}"))
             self.root.after(0, lambda: self.append_log(f"[{timestamp}] 开始请求"))
             self.root.after(0, lambda: self.append_log(f"模型: {model_name}"))
@@ -564,6 +717,11 @@ class AIDebugTool:
             self.root.after(0, lambda: self.append_log(f"响应格式: {response_format}"))
             self.root.after(0, lambda: self.append_log(f"Temperature: {self.temperature_var.get()}"))
             self.root.after(0, lambda: self.append_log(f"流式响应: {'启用' if use_stream else '禁用'}"))
+            
+            # 记录PDF信息
+            if self.uploaded_images:
+                self.root.after(0, lambda: self.append_log(f"PDF文件: {self.uploaded_pdf_name} ({len(self.uploaded_images)} 页)"))
+            
             log_system = f"System: {system_content[:50]}..." if len(system_content) > 50 else f"System: {system_content}"
             log_user = f"User: {user_content[:50]}..." if len(user_content) > 50 else f"User: {user_content}"
             self.root.after(0, lambda: self.append_log(log_system))

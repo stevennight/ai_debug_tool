@@ -34,21 +34,33 @@ if not exist "%PYTHON_EXE%" (
     echo.
 )
 
-echo [INFO] Checking dependencies...
-"%PYTHON_EXE%" -c "import requests, pydantic" >nul 2>&1
+@REM echo [INFO] Checking dependencies...
+@REM "%PYTHON_EXE%" -c "import requests, pydantic" >nul 2>&1
+@REM if errorlevel 1 (
+@REM     echo [INFO] Installing dependencies...
+@REM     "%PYTHON_EXE%" -m pip install --upgrade pip -q
+@REM     "%PYTHON_EXE%" -m pip install -r requirements.txt
+@REM     if errorlevel 1 (
+@REM         echo [ERROR] Failed to install dependencies
+@REM         echo.
+@REM         pause
+@REM         exit /b 1
+@REM     )
+@REM     echo [SUCCESS] Dependencies installed
+@REM     echo.
+@REM )
+
+echo [INFO] Installing dependencies...
+"%PYTHON_EXE%" -m pip install --upgrade pip -q
+"%PYTHON_EXE%" -m pip install -r requirements.txt
 if errorlevel 1 (
-    echo [INFO] Installing dependencies...
-    "%PYTHON_EXE%" -m pip install --upgrade pip -q
-    "%PYTHON_EXE%" -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo [ERROR] Failed to install dependencies
-        echo.
-        pause
-        exit /b 1
-    )
-    echo [SUCCESS] Dependencies installed
+    echo [ERROR] Failed to install dependencies
     echo.
+    pause
+    exit /b 1
 )
+echo [SUCCESS] Dependencies installed
+echo.
 
 echo [INFO] Starting AI Debug Tool...
 echo ==========================================

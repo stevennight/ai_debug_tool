@@ -54,80 +54,23 @@ pip install -r requirements.txt
 依赖包说明：
 - `requests>=2.31.0` - HTTP请求库
 - `pydantic>=2.0.0` - 数据验证和序列化
-- `pdf2image>=1.16.0` - PDF转图片（仅PDF功能需要）
+- `PyMuPDF>=1.23.0` - PDF转图片（仅PDF功能需要，纯Python实现）
 - `Pillow>=10.0.0` - 图像处理（仅PDF功能需要）
 
-### 4. 安装Poppler（仅PDF功能需要）
+### 4. PDF功能说明
 
-**⚠️ 重要**: 如果您需要使用PDF上传功能，必须安装Poppler工具。pdf2image库依赖Poppler来转换PDF文件。
+**✅ 好消息**: PDF功能使用 PyMuPDF（纯Python库），**无需安装任何外部工具**！
 
-#### Windows系统
+PyMuPDF 特点：
+- ✅ 完全跨平台，Windows/Linux/macOS 开箱即用
+- ✅ 原生支持中文路径和文件名
+- ✅ 速度快，内存占用低
+- ✅ 无需配置环境变量
 
-**方法一：手动安装（推荐）**
-
-1. 下载Poppler for Windows: 
-   - 访问 https://github.com/oschwartz10612/poppler-windows/releases
-   - 下载最新的 `Release-xx.xx.x.zip` 文件
-
-2. 解压到合适的目录，例如：
-   ```
-   C:\Program Files\poppler-24.08.0\
-   ```
-
-3. 将Poppler的bin目录添加到系统环境变量PATH：
-   - 右键点击"此电脑" → "属性" → "高级系统设置"
-   - 点击"环境变量"
-   - 在"系统变量"中找到"Path"，点击"编辑"
-   - 点击"新建"，添加路径：`C:\Program Files\poppler-24.08.0\Library\bin`
-   - 点击"确定"保存
-
-4. 重启命令行窗口，验证安装：
-   ```bash
-   pdftoppm -h
-   ```
-   如果显示帮助信息，说明安装成功。
-
-**方法二：使用Conda安装**
-
-如果您使用Anaconda或Miniconda：
+如果您需要使用PDF上传功能，只需确保安装了依赖包即可：
 
 ```bash
-conda install -c conda-forge poppler
-```
-
-#### Linux系统
-
-```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install poppler-utils
-
-# CentOS/RHEL
-sudo yum install poppler-utils
-
-# Fedora
-sudo dnf install poppler-utils
-
-# Arch Linux
-sudo pacman -S poppler
-```
-
-验证安装：
-```bash
-pdftoppm -h
-```
-
-#### macOS系统
-
-使用Homebrew安装：
-
-```bash
-brew install poppler
-```
-
-验证安装：
-```bash
-pdftoppm -h
+pip install -r requirements.txt
 ```
 
 ### 5. 验证安装
@@ -142,17 +85,13 @@ print("✅ 基本依赖安装成功")
 
 # 验证PDF依赖
 try:
-    import pdf2image
+    import fitz  # PyMuPDF
     from PIL import Image
     print("✅ PDF处理依赖安装成功")
-    
-    # 测试Poppler
-    pdf2image.convert_from_path('test.pdf', dpi=200)
-    print("✅ Poppler安装成功")
+    print(f"   PyMuPDF版本: {fitz.version}")
 except ImportError as e:
     print(f"⚠️ PDF依赖缺失: {e}")
-except Exception as e:
-    print(f"⚠️ Poppler未安装或配置不正确")
+    print("   请运行: pip install PyMuPDF Pillow")
 ```
 
 ## 使用说明
@@ -257,7 +196,7 @@ python ai_debug_tool.py
 
 ### PDF处理流程
 
-1. 使用`pdf2image`库将PDF转换为PIL图像对象
+1. 使用 `PyMuPDF` (fitz) 将PDF转换为图像对象
 2. 自动调整图片大小（最大2048px），压缩以减小传输体积
 3. 转换为JPEG格式的base64编码
 4. 按照OpenAI Vision API标准构建消息格式：
@@ -300,16 +239,16 @@ use_stream = true
 
 ## 故障排除
 
-### 问题1: 提示"需要安装 pdf2image 和 Pillow 库"
+### 问题1: 提示"需要安装 PyMuPDF 和 Pillow 库"
 
 **原因**: PDF处理依赖未安装
 
 **解决方案**:
 ```bash
-pip install pdf2image Pillow
+pip install PyMuPDF Pillow
 ```
 
-### 问题2: "Unable to get page count. Is poppler installed and in PATH?"
+### 问题2: PDF转换失败或中文路径问题
 
 **原因**: Poppler未正确安装或未添加到系统PATH
 
@@ -435,11 +374,11 @@ A: 如果您的本地模型提供了兼容的HTTP API接口，可以配置API地
 
 **Q: PDF转换需要多长时间？**
 
-A: 取决于PDF大小和页数。通常每页处理时间在1-3秒。50页的文档大约需要1-2分钟。
+A: PyMuPDF 速度很快，通常每页处理时间在 0.5-1 秒。50页的文档大约需要 30-60 秒。
 
 **Q: 转换的图片质量如何？**
 
-A: 默认使用200 DPI，JPEG质量85%，最大尺寸2048px。可在代码的`pdf_to_images`函数中调整。
+A: 默认使用 2倍缩放（约200 DPI），JPEG质量85%，最大尺寸2048px。可在代码的`pdf_to_images`函数中调整 `fitz.Matrix(2, 2)` 参数来改变分辨率。
 
 **Q: 是否会保存上传的PDF？**
 

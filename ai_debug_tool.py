@@ -31,22 +31,29 @@ logging.basicConfig(
 def pdf_to_images(pdf_path: str) -> list[str]:
     """将PDF转换为图片的base64编码列表
     
+    使用 PyMuPDF (fitz) 进行转换，原生支持中文路径，无需外部依赖
+    
     :param pdf_path: PDF文件路径
     :return: 图片base64编码列表
     """
     try:
-        from pdf2image import convert_from_path
+        import fitz  # PyMuPDF
         from PIL import Image
         import io
         
-        # 将PDF转换为图片列表
-        images = convert_from_path(pdf_path, dpi=200)
-        
+        # 打开PDF文档
+        doc = fitz.open(pdf_path)
         base64_images = []
-        for img in images:
-            # 将图片转换为RGB模式（如果不是的话）
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
+        
+        # 遍历每一页
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # 渲染为图片 (matrix参数控制分辨率, 2倍约等于200DPI)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            
+            # 转换为PIL Image对象
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             
             # 压缩图片以减小大小
             # 如果图片太大，缩小尺寸
@@ -62,9 +69,12 @@ def pdf_to_images(pdf_path: str) -> list[str]:
             img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
             base64_images.append(img_base64)
         
+        # 关闭文档
+        doc.close()
         return base64_images
+        
     except ImportError:
-        raise ImportError("需要安装 pdf2image 和 Pillow 库。请运行: pip install pdf2image Pillow")
+        raise ImportError("需要安装 PyMuPDF 和 Pillow 库。请运行: pip install PyMuPDF Pillow")
     except Exception as e:
         raise Exception(f"PDF转换失败: {str(e)}")
 

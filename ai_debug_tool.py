@@ -204,7 +204,7 @@ def call_ai(api_url: str, application: str, messages: list[LlmMessage],
 
 def call_ai_stream(api_url: str, application: str, messages: list[LlmMessage], 
                    model: LlmModel, api_key: str = None, timeout: int = 60, 
-                   callback=None, **kwargs):
+                   callback=None, cancel_check=None, **kwargs):
     """调用AI接口（流式响应）
     
     :param api_url: API地址
@@ -214,8 +214,9 @@ def call_ai_stream(api_url: str, application: str, messages: list[LlmMessage],
     :param api_key: API密钥（可选，用于OpenAI等第三方API）
     :param timeout: 超时时间
     :param callback: 回调函数，用于接收流式数据片段 callback(chunk_text)
+    :param cancel_check: 取消检查函数，返回True表示应该取消请求
     :param kwargs: 其他参数
-    :return: 完整的AI回复内容
+    :return: 完整的AI回复内容，如果被取消则返回None
     """
     # 构建请求数据
     requests_data = {
@@ -250,6 +251,12 @@ def call_ai_stream(api_url: str, application: str, messages: list[LlmMessage],
     # 处理流式响应
     full_content = ""
     for line in response.iter_lines():
+        # 检查是否取消
+        if cancel_check and cancel_check():
+            logging.info("流式请求被取消")
+            response.close()
+            return None
+        
         if not line:
             continue
             
@@ -278,6 +285,11 @@ def call_ai_stream(api_url: str, application: str, messages: list[LlmMessage],
                         full_content += content
                         # 调用回调函数，实时传递内容片段
                         if callback:
+                            # 在回调中也检查取消标志
+                            if cancel_check and cancel_check():
+                                logging.info("流式请求在回调中被取消")
+                                response.close()
+                                return None
                             callback(content)
             except json.JSONDecodeError as e:
                 logging.warning(f"解析流式数据失败: {data_str}, 错误: {e}")
@@ -303,6 +315,10 @@ class AIDebugTool:
         # 存储上传的PDF图片
         self.uploaded_images = []
         self.uploaded_pdf_name = None
+        
+        # 请求取消标志
+        self.request_cancelled = False
+        self.current_request = None  # 用于存储当前请求对象，以便取消
         
         # 创建界面
         self.create_widgets()
@@ -502,6 +518,14 @@ class AIDebugTool:
         )
         self.send_button.pack(side=tk.LEFT, padx=5)
         
+        self.cancel_button = ttk.Button(
+            button_frame,
+            text="取消请求",
+            command=self.cancel_request,
+            state=tk.DISABLED
+        )
+        self.cancel_button.pack(side=tk.LEFT, padx=5)
+        
         clear_button = ttk.Button(
             button_frame, 
             text="清空输出", 
@@ -641,6 +665,13 @@ class AIDebugTool:
         self.upload_status_label.config(text="未上传文件", foreground='gray')
         self.clear_upload_button.config(state=tk.DISABLED)
     
+    def cancel_request(self):
+        """取消当前请求"""
+        self.request_cancelled = True
+        self.root.after(0, lambda: self.append_output("\n[请求已取消]\n", 'info'))
+        self.root.after(0, lambda: self.append_log("用户取消了请求"))
+        self.root.after(0, lambda: self.status_label.config(text="请求已取消", foreground='orange'))
+    
     def send_request(self):
         """发送AI请求"""
         # 获取连续请求次数
@@ -653,8 +684,12 @@ class AIDebugTool:
             messagebox.showwarning("警告", "连续请求次数必须是有效的数字！")
             return
         
-        # 禁用发送按钮
+        # 重置取消标志
+        self.request_cancelled = False
+        
+        # 禁用发送按钮，启用取消按钮
         self.send_button.config(state=tk.DISABLED)
+        self.cancel_button.config(state=tk.NORMAL)
         self.status_label.config(text="请求中...", foreground='orange')
         self.root.update()
         
@@ -664,18 +699,24 @@ class AIDebugTool:
     
     def _stream_callback(self, chunk: str):
         """流式响应回调函数,在主线程中更新UI"""
+        # 如果已取消，不处理后续数据
+        if self.request_cancelled:
+            return
+        
         # 记录首字响应时间
         if self.first_chunk_time is None:
             self.first_chunk_time = time.time()
             first_chunk_delay = self.first_chunk_time - self.request_start_time
             
             def show_first_chunk_time():
-                self.append_output(f"[首字响应: {first_chunk_delay:.2f}秒]\n", 'info')
+                if not self.request_cancelled:
+                    self.append_output(f"[首字响应: {first_chunk_delay:.2f}秒]\n", 'info')
             
             self.root.after(0, show_first_chunk_time)
         
         def update_ui():
-            self.append_output(chunk, 'response')
+            if not self.request_cancelled:
+                self.append_output(chunk, 'response')
         
         # 确保在主线程中更新UI
         self.root.after(0, update_ui)
@@ -684,31 +725,70 @@ class AIDebugTool:
         """在线程中发送请求"""
         success_count = 0
         fail_count = 0
+        cancelled = False
         
         try:
             # 循环执行N次请求
             for request_num in range(1, repeat_count + 1):
+                # 检查是否取消
+                if self.request_cancelled:
+                    cancelled = True
+                    self.root.after(0, lambda num=request_num, total=repeat_count: self.append_log(
+                        f"请求已取消，已执行 {num-1}/{total} 次"
+                    ))
+                    break
+                
                 # 如果是多次请求，添加分隔符
                 if repeat_count > 1 and request_num > 1:
                     self.root.after(0, lambda: self.append_output(f"\n{'='*60}\n", 'timestamp'))
                 
                 try:
                     # 执行单次请求
-                    self._execute_single_request(request_num, repeat_count)
+                    result = self._execute_single_request(request_num, repeat_count)
+                    # 如果返回None，表示请求被取消
+                    if result is None:
+                        cancelled = True
+                        break
                     success_count += 1
                 except Exception as e:
+                    # 检查是否是取消导致的异常
+                    if self.request_cancelled:
+                        cancelled = True
+                        break
                     # 单次请求失败，记录错误但继续执行
                     fail_count += 1
                     error_str = str(e)
-                    self.root.after(0, lambda: self.append_output(f"\n错误:\n{error_str}\n", 'error'))
-                    self.root.after(0, lambda: self.append_log(f"第 {request_num} 次请求失败: {error_str}"))
+                    self.root.after(0, lambda err=error_str: self.append_output(f"\n错误:\n{err}\n", 'error'))
+                    self.root.after(0, lambda num=request_num, err=error_str: self.append_log(
+                        f"第 {num} 次请求失败: {err}"
+                    ))
+                
+                # 检查是否取消
+                if self.request_cancelled:
+                    cancelled = True
+                    break
                 
                 # 如果不是最后一次请求，添加短暂延迟
                 if request_num < repeat_count:
-                    time.sleep(0.5)  # 短暂延迟，避免请求过快
+                    # 在延迟期间也检查取消标志
+                    for _ in range(5):  # 0.5秒分成5次检查
+                        if self.request_cancelled:
+                            cancelled = True
+                            break
+                        time.sleep(0.1)
+                    if cancelled:
+                        break
             
             # 所有请求完成后的状态更新
-            if repeat_count > 1:
+            if cancelled:
+                status_text = f"已取消，完成 {success_count}/{repeat_count} 次请求"
+                if fail_count > 0:
+                    status_text += f" ({fail_count} 次失败)"
+                self.root.after(0, lambda text=status_text: self.status_label.config(
+                    text=text, 
+                    foreground='orange'
+                ))
+            elif repeat_count > 1:
                 status_text = f"完成 {success_count}/{repeat_count} 次请求"
                 if fail_count > 0:
                     status_text += f" ({fail_count} 次失败)"
@@ -718,24 +798,31 @@ class AIDebugTool:
                 ))
         except Exception as e:
             error_str = str(e)
-            self.root.after(0, lambda: self.append_output(f"\n错误:\n{error_str}\n", 'error'))
-            self.root.after(0, lambda: self.append_log(f"请求失败: {error_str}"))
+            self.root.after(0, lambda err=error_str: self.append_output(f"\n错误:\n{err}\n", 'error'))
+            self.root.after(0, lambda err=error_str: self.append_log(f"请求失败: {err}"))
             self.root.after(0, lambda: self.status_label.config(text="请求失败", foreground='red'))
-            self.root.after(0, lambda: messagebox.showerror("错误", f"请求失败:\n{error_str}"))
+            if not self.request_cancelled:
+                self.root.after(0, lambda err=error_str: messagebox.showerror("错误", f"请求失败:\n{err}"))
         finally:
-            # 恢复发送按钮
+            # 恢复按钮状态
             self.root.after(0, lambda: self.send_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.cancel_button.config(state=tk.DISABLED))
     
     def _execute_single_request(self, request_num, total_count):
-        """执行单次请求"""
+        """执行单次请求
+        返回: 响应内容，如果被取消则返回None
+        """
         try:
+            # 检查是否取消
+            if self.request_cancelled:
+                return None
             # 获取输入
             system_content = self.system_text.get('1.0', tk.END).strip()
             user_content = self.user_text.get('1.0', tk.END).strip()
             
             if not user_content:
                 self.root.after(0, lambda: messagebox.showwarning("警告", "User输入不能为空！"))
-                return
+                raise ValueError("User输入不能为空")
             
             # 构建消息
             messages = []
@@ -861,10 +948,15 @@ class AIDebugTool:
                     api_key=api_key if api_key else None,
                     timeout=timeout,
                     callback=self._stream_callback,
+                    cancel_check=lambda: self.request_cancelled,
                     **extra_kwargs
                 )
+                # 如果被取消，返回None
+                if response is None:
+                    self.root.after(0, lambda: self.append_output("\n[请求已取消]\n", 'info'))
+                    return None
             else:
-                # 非流式响应
+                # 非流式响应（无法真正取消HTTP请求，但可以在完成后检查）
                 response = call_ai(
                     api_url=api_url,
                     application=application,
@@ -874,6 +966,10 @@ class AIDebugTool:
                     timeout=timeout,
                     **extra_kwargs
                 )
+                # 检查是否在请求期间被取消
+                if self.request_cancelled:
+                    self.root.after(0, lambda: self.append_output("\n[请求已取消]\n", 'info'))
+                    return None
                 
                 # 显示响应
                 # 如果是JSON格式，尝试格式化显示
@@ -892,7 +988,7 @@ class AIDebugTool:
             total_time = time.time() - self.request_start_time
             
             # 记录成功
-            response_len = len(response)
+            response_len = len(response) if response else 0
             self.root.after(0, lambda tt=total_time: self.append_output(f"\n[总用时: {tt:.2f}秒]\n", 'info'))
             self.root.after(0, lambda rl=response_len: self.append_log(f"响应长度: {rl} 字符"))
             self.root.after(0, lambda tt=total_time: self.append_log(f"总用时: {tt:.2f}秒"))
@@ -915,6 +1011,9 @@ class AIDebugTool:
                     text=f"请求成功 (用时{tt:.2f}秒)", 
                     foreground='green'
                 ))
+            
+            # 返回响应内容，表示请求成功
+            return response
             
         except Exception as e:
             error_msg = traceback.format_exc()

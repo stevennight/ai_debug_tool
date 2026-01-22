@@ -384,6 +384,21 @@ class AIDebugTool:
         )
         stream_check.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
         
+        # 连续请求次数
+        ttk.Label(config_frame, text="连续请求次数:").grid(row=2, column=2, sticky=tk.W, padx=5, pady=2)
+        self.repeat_count_var = tk.StringVar(value=self.config.get('repeat_count', '1'))
+        repeat_count_entry = ttk.Entry(config_frame, textvariable=self.repeat_count_var, width=10)
+        repeat_count_entry.grid(row=2, column=3, sticky=tk.W, padx=5, pady=2)
+        
+        # 连续请求说明
+        repeat_help = ttk.Label(
+            config_frame, 
+            text="(设置为1表示单次请求)",
+            font=('Arial', 7),
+            foreground='gray'
+        )
+        repeat_help.grid(row=2, column=4, sticky=tk.W, padx=2, pady=2)
+        
         # 响应格式
         ttk.Label(config_frame, text="响应格式:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
         self.response_format_var = tk.StringVar(value=self.config.get('response_format', 'text'))
@@ -547,6 +562,7 @@ class AIDebugTool:
             self.config.set('model', self.model_var.get())
             self.config.set('temperature', self.temperature_var.get())
             self.config.set('use_stream', 'true' if self.use_stream_var.get() else 'false')
+            self.config.set('repeat_count', self.repeat_count_var.get())
             messagebox.showinfo("成功", "配置已保存！")
         except Exception as e:
             messagebox.showerror("错误", f"保存配置失败: {str(e)}")
@@ -627,17 +643,23 @@ class AIDebugTool:
     
     def send_request(self):
         """发送AI请求"""
+        # 获取连续请求次数
+        try:
+            repeat_count = int(self.repeat_count_var.get())
+            if repeat_count < 1:
+                messagebox.showwarning("警告", "连续请求次数必须大于0！")
+                return
+        except ValueError:
+            messagebox.showwarning("警告", "连续请求次数必须是有效的数字！")
+            return
+        
         # 禁用发送按钮
         self.send_button.config(state=tk.DISABLED)
         self.status_label.config(text="请求中...", foreground='orange')
         self.root.update()
         
-        # 初始化计时变量
-        self.request_start_time = time.time()
-        self.first_chunk_time = None
-        
         # 在单独的线程中执行请求,避免卡死界面
-        thread = threading.Thread(target=self._send_request_thread, daemon=True)
+        thread = threading.Thread(target=self._send_request_thread, args=(repeat_count,), daemon=True)
         thread.start()
     
     def _stream_callback(self, chunk: str):
@@ -658,8 +680,54 @@ class AIDebugTool:
         # 确保在主线程中更新UI
         self.root.after(0, update_ui)
     
-    def _send_request_thread(self):
+    def _send_request_thread(self, repeat_count=1):
         """在线程中发送请求"""
+        success_count = 0
+        fail_count = 0
+        
+        try:
+            # 循环执行N次请求
+            for request_num in range(1, repeat_count + 1):
+                # 如果是多次请求，添加分隔符
+                if repeat_count > 1 and request_num > 1:
+                    self.root.after(0, lambda: self.append_output(f"\n{'='*60}\n", 'timestamp'))
+                
+                try:
+                    # 执行单次请求
+                    self._execute_single_request(request_num, repeat_count)
+                    success_count += 1
+                except Exception as e:
+                    # 单次请求失败，记录错误但继续执行
+                    fail_count += 1
+                    error_str = str(e)
+                    self.root.after(0, lambda: self.append_output(f"\n错误:\n{error_str}\n", 'error'))
+                    self.root.after(0, lambda: self.append_log(f"第 {request_num} 次请求失败: {error_str}"))
+                
+                # 如果不是最后一次请求，添加短暂延迟
+                if request_num < repeat_count:
+                    time.sleep(0.5)  # 短暂延迟，避免请求过快
+            
+            # 所有请求完成后的状态更新
+            if repeat_count > 1:
+                status_text = f"完成 {success_count}/{repeat_count} 次请求"
+                if fail_count > 0:
+                    status_text += f" ({fail_count} 次失败)"
+                self.root.after(0, lambda text=status_text: self.status_label.config(
+                    text=text, 
+                    foreground='green' if fail_count == 0 else 'orange'
+                ))
+        except Exception as e:
+            error_str = str(e)
+            self.root.after(0, lambda: self.append_output(f"\n错误:\n{error_str}\n", 'error'))
+            self.root.after(0, lambda: self.append_log(f"请求失败: {error_str}"))
+            self.root.after(0, lambda: self.status_label.config(text="请求失败", foreground='red'))
+            self.root.after(0, lambda: messagebox.showerror("错误", f"请求失败:\n{error_str}"))
+        finally:
+            # 恢复发送按钮
+            self.root.after(0, lambda: self.send_button.config(state=tk.NORMAL))
+    
+    def _execute_single_request(self, request_num, total_count):
+        """执行单次请求"""
         try:
             # 获取输入
             system_content = self.system_text.get('1.0', tk.END).strip()
@@ -708,34 +776,61 @@ class AIDebugTool:
             response_format = self.response_format_var.get()
             use_stream = self.use_stream_var.get()
             
+            # 初始化计时变量
+            self.request_start_time = time.time()
+            self.first_chunk_time = None
+            
             # 记录请求信息
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             self.root.after(0, lambda: self.append_output(f"\n{'='*60}\n", 'timestamp'))
-            self.root.after(0, lambda: self.append_output(f"[{timestamp}] ", 'timestamp'))
-            self.root.after(0, lambda: self.append_output(f"请求模型: {model_name} ({'流式' if use_stream else '非流式'})\n", 'success'))
+            
+            # 添加"第N次"标识
+            if total_count > 1:
+                self.root.after(0, lambda num=request_num, total=total_count: self.append_output(
+                    f"第 {num}/{total} 次 ", 'info'
+                ))
+            
+            self.root.after(0, lambda ts=timestamp: self.append_output(f"[{ts}] ", 'timestamp'))
+            self.root.after(0, lambda mn=model_name, us=use_stream: self.append_output(
+                f"请求模型: {mn} ({'流式' if us else '非流式'})\n", 'success'
+            ))
             
             # 如果有上传PDF，显示信息
             if self.uploaded_images:
                 pdf_info = f"已附加PDF: {self.uploaded_pdf_name} ({len(self.uploaded_images)} 页)\n"
-                self.root.after(0, lambda: self.append_output(pdf_info, 'info'))
+                self.root.after(0, lambda info=pdf_info: self.append_output(info, 'info'))
             
-            self.root.after(0, lambda: self.append_log(f"{'='*60}"))
-            self.root.after(0, lambda: self.append_log(f"[{timestamp}] 开始请求"))
-            self.root.after(0, lambda: self.append_log(f"模型: {model_name}"))
-            self.root.after(0, lambda: self.append_log(f"API: {api_url}"))
-            self.root.after(0, lambda: self.append_log(f"API Key: {'已设置' if api_key else '未设置'}"))
-            self.root.after(0, lambda: self.append_log(f"响应格式: {response_format}"))
+            # 在日志中也添加"第N次"标识
+            if total_count > 1:
+                self.root.after(0, lambda num=request_num, total=total_count: self.append_log(
+                    f"{'='*60}"
+                ))
+                self.root.after(0, lambda num=request_num, total=total_count: self.append_log(
+                    f"第 {num}/{total} 次请求"
+                ))
+            else:
+                self.root.after(0, lambda: self.append_log(f"{'='*60}"))
+            
+            self.root.after(0, lambda ts=timestamp: self.append_log(f"[{ts}] 开始请求"))
+            self.root.after(0, lambda mn=model_name: self.append_log(f"模型: {mn}"))
+            self.root.after(0, lambda url=api_url: self.append_log(f"API: {url}"))
+            self.root.after(0, lambda key=api_key: self.append_log(f"API Key: {'已设置' if key else '未设置'}"))
+            self.root.after(0, lambda rf=response_format: self.append_log(f"响应格式: {rf}"))
             self.root.after(0, lambda: self.append_log(f"Temperature: {self.temperature_var.get()}"))
-            self.root.after(0, lambda: self.append_log(f"流式响应: {'启用' if use_stream else '禁用'}"))
+            self.root.after(0, lambda us=use_stream: self.append_log(f"流式响应: {'启用' if us else '禁用'}"))
             
             # 记录PDF信息
             if self.uploaded_images:
-                self.root.after(0, lambda: self.append_log(f"PDF文件: {self.uploaded_pdf_name} ({len(self.uploaded_images)} 页)"))
+                pdf_name = self.uploaded_pdf_name
+                pdf_pages = len(self.uploaded_images)
+                self.root.after(0, lambda name=pdf_name, pages=pdf_pages: self.append_log(
+                    f"PDF文件: {name} ({pages} 页)"
+                ))
             
             log_system = f"System: {system_content[:50]}..." if len(system_content) > 50 else f"System: {system_content}"
             log_user = f"User: {user_content[:50]}..." if len(user_content) > 50 else f"User: {user_content}"
-            self.root.after(0, lambda: self.append_log(log_system))
-            self.root.after(0, lambda: self.append_log(log_user))
+            self.root.after(0, lambda ls=log_system: self.append_log(ls))
+            self.root.after(0, lambda lu=log_user: self.append_log(lu))
             
             # 构建额外参数
             extra_kwargs = {}
@@ -786,39 +881,63 @@ class AIDebugTool:
                     try:
                         json_obj = json.loads(response)
                         formatted_response = json.dumps(json_obj, ensure_ascii=False, indent=2)
-                        self.root.after(0, lambda: self.append_output(f"{formatted_response}\n", 'response'))
+                        self.root.after(0, lambda resp=formatted_response: self.append_output(f"{resp}\n", 'response'))
                     except:
                         # 如果解析失败，直接显示原文
-                        self.root.after(0, lambda: self.append_output(f"{response}\n", 'response'))
+                        self.root.after(0, lambda resp=response: self.append_output(f"{resp}\n", 'response'))
                 else:
-                    self.root.after(0, lambda: self.append_output(f"{response}\n", 'response'))
+                    self.root.after(0, lambda resp=response: self.append_output(f"{resp}\n", 'response'))
             
             # 计算总用时
             total_time = time.time() - self.request_start_time
             
             # 记录成功
             response_len = len(response)
-            self.root.after(0, lambda: self.append_output(f"\n[总用时: {total_time:.2f}秒]\n", 'info'))
-            self.root.after(0, lambda: self.append_log(f"响应长度: {response_len} 字符"))
-            self.root.after(0, lambda: self.append_log(f"总用时: {total_time:.2f}秒"))
+            self.root.after(0, lambda tt=total_time: self.append_output(f"\n[总用时: {tt:.2f}秒]\n", 'info'))
+            self.root.after(0, lambda rl=response_len: self.append_log(f"响应长度: {rl} 字符"))
+            self.root.after(0, lambda tt=total_time: self.append_log(f"总用时: {tt:.2f}秒"))
             if use_stream and self.first_chunk_time is not None:
                 first_chunk_delay = self.first_chunk_time - self.request_start_time
-                self.root.after(0, lambda: self.append_log(f"首字响应: {first_chunk_delay:.2f}秒"))
-            self.root.after(0, lambda: self.append_log("请求成功！"))
-            self.root.after(0, lambda: self.status_label.config(text=f"请求成功 (用时{total_time:.2f}秒)", foreground='green'))
+                self.root.after(0, lambda fcd=first_chunk_delay: self.append_log(f"首字响应: {fcd:.2f}秒"))
+            
+            # 如果是多次请求，显示当前进度
+            if total_count > 1:
+                self.root.after(0, lambda num=request_num, total=total_count: self.append_log(
+                    f"第 {num}/{total} 次请求成功！"
+                ))
+                self.root.after(0, lambda num=request_num, total=total_count, tt=total_time: self.status_label.config(
+                    text=f"第 {num}/{total} 次请求完成 (用时{tt:.2f}秒)", 
+                    foreground='green'
+                ))
+            else:
+                self.root.after(0, lambda: self.append_log("请求成功！"))
+                self.root.after(0, lambda tt=total_time: self.status_label.config(
+                    text=f"请求成功 (用时{tt:.2f}秒)", 
+                    foreground='green'
+                ))
             
         except Exception as e:
             error_msg = traceback.format_exc()
             error_str = str(e)
-            self.root.after(0, lambda: self.append_output(f"\n错误:\n{error_str}\n", 'error'))
-            self.root.after(0, lambda: self.append_log(f"请求失败: {error_str}"))
-            self.root.after(0, lambda: self.append_log(error_msg))
-            self.root.after(0, lambda: self.status_label.config(text="请求失败", foreground='red'))
-            self.root.after(0, lambda: messagebox.showerror("错误", f"请求失败:\n{error_str}"))
-        
-        finally:
-            # 恢复发送按钮
-            self.root.after(0, lambda: self.send_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda err=error_str: self.append_output(f"\n错误:\n{err}\n", 'error'))
+            self.root.after(0, lambda err=error_str: self.append_log(f"请求失败: {err}"))
+            self.root.after(0, lambda em=error_msg: self.append_log(em))
+            
+            # 如果是多次请求，显示当前进度
+            if total_count > 1:
+                self.root.after(0, lambda num=request_num, total=total_count: self.status_label.config(
+                    text=f"第 {num}/{total} 次请求失败", 
+                    foreground='red'
+                ))
+            else:
+                self.root.after(0, lambda: self.status_label.config(text="请求失败", foreground='red'))
+            
+            # 只在单次请求或最后一次请求失败时显示错误对话框
+            if total_count == 1 or request_num == total_count:
+                self.root.after(0, lambda err=error_str: messagebox.showerror("错误", f"请求失败:\n{err}"))
+            
+            # 重新抛出异常，让外层捕获
+            raise
     
     def on_closing(self):
         """窗口关闭事件"""
